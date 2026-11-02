@@ -13,8 +13,8 @@ Usage:
   # Preprocess all official tutorial assets (downloads them into data/ if missing):
   python examples/embedding_mm/tools/preprocess.py --model-dir path/to/embeddinggemma-2
 
-  # Preprocess and also export PyTorch golden reference for unit tests:
-  python examples/embedding_mm/tools/preprocess.py --model-dir path/to/embeddinggemma-2 --export-golden
+  # Preprocess and also export PyTorch reference baseline for unit tests:
+  python examples/embedding_mm/tools/preprocess.py --model-dir path/to/embeddinggemma-2 --export-reference
 
   # Preprocess a custom image, audio, or video file:
   python examples/embedding_mm/tools/preprocess.py --model-dir path/to/embeddinggemma-2 --image my_photo.jpg
@@ -345,14 +345,15 @@ def ensure_official_assets(data_dir: Path):
             urllib.request.urlretrieve(url, str(dest))
 
 
-def export_golden_reference(model_dir: str, data_dir: Path):
+def export_reference_baseline(model_dir: str, data_dir: Path, dtype_str: str = "bfloat16"):
     import torch
     from sentence_transformers import SentenceTransformer
 
     dev = "cuda" if torch.cuda.is_available() else "cpu"
-    print(f"\n[Golden Export] Loading SentenceTransformer model on '{dev}' (float32)...")
+    torch_dtype = torch.bfloat16 if dtype_str == "bfloat16" else torch.float32
+    print(f"\n[Reference Export] Loading SentenceTransformer model on '{dev}' ({dtype_str})...")
     st_model = SentenceTransformer(
-        model_dir, device=dev, model_kwargs={"dtype": torch.float32}
+        model_dir, device=dev, model_kwargs={"dtype": torch_dtype}
     )
     st_model.eval()
     hf_model = st_model[0].auto_model
@@ -367,7 +368,7 @@ def export_golden_reference(model_dir: str, data_dir: Path):
     img2 = Image.open(img2_path).convert("RGB")
     audio_16k = load_audio_16k(audio_path)
 
-    golden = {}
+    ref_data = {}
 
     def encode_mrl_dict(st_inst, inp, processing_kwargs=None, **kwargs):
         prev_pk = getattr(st_inst[0], "processing_kwargs", None)
@@ -379,7 +380,7 @@ def export_golden_reference(model_dir: str, data_dir: Path):
             if processing_kwargs is not None:
                 st_inst[0].processing_kwargs = prev_pk
         if isinstance(vec768, torch.Tensor):
-            vec768 = vec768.detach().cpu().numpy()
+            vec768 = vec768.float().detach().cpu().numpy()
         vec768 = np.asarray(vec768, dtype=np.float32).reshape(-1)
         out = {}
         for d in (768, 512, 256, 128):
@@ -394,7 +395,7 @@ def export_golden_reference(model_dir: str, data_dir: Path):
     doc_text = "The northern lights are caused by charged particles from the sun."
     q_mrl, q_vec = encode_mrl_dict(st_model, query_text, prompt_name="SearchQuery")
     d_mrl, d_vec = encode_mrl_dict(st_model, doc_text, prompt_name="Document")
-    golden["text"] = {
+    ref_data["text"] = {
         "query": query_text,
         "document": doc_text,
         "query_embeddings": q_mrl,
@@ -410,7 +411,7 @@ def export_golden_reference(model_dir: str, data_dir: Path):
             images=[img1],
             return_tensors="pt",
         )
-        px_t = v_batch["pixel_values"].to(dev, dtype=torch.float32)
+        px_t = v_batch["pixel_values"].to(dev, dtype=torch_dtype)
         pos_t = v_batch["image_position_ids"].to(dev)
         v_tower = hf_model.vision_tower
         v_conn = hf_model.embed_vision
@@ -455,12 +456,12 @@ def export_golden_reference(model_dir: str, data_dir: Path):
         float(np.dot(img1_1120_vec, c)) for c in img_cand_vecs
     ]
 
-    golden["vision"] = {
+    ref_data["vision"] = {
         "layer_activations": {
-            "patch_embed_slice": patch_embeds[0, :64, :16].detach().cpu().reshape(-1).tolist(),
-            "vit_layer0_slice": layer0_out[0, :64, :16].detach().cpu().reshape(-1).tolist(),
-            "pooled_slice": pooled_out[:32, :16].detach().cpu().reshape(-1).tolist(),
-            "soft_tokens_slice": soft_tokens[:32, :16].detach().cpu().reshape(-1).tolist(),
+            "patch_embed_slice": patch_embeds[0, :64, :16].float().detach().cpu().reshape(-1).tolist(),
+            "vit_layer0_slice": layer0_out[0, :64, :16].float().detach().cpu().reshape(-1).tolist(),
+            "pooled_slice": pooled_out[:32, :16].float().detach().cpu().reshape(-1).tolist(),
+            "soft_tokens_slice": soft_tokens[:32, :16].float().detach().cpu().reshape(-1).tolist(),
         },
         "GoldenGate_280": img1_mrl,
         "kitchen_painting_280": img2_mrl,
@@ -472,10 +473,10 @@ def export_golden_reference(model_dir: str, data_dir: Path):
     }
 
     # 3. Audio section + Audio Conformer intermediate activations
-    print("  [3/6] Computing Audio Conformer intermediate activations & Audio retrieval golden...")
+    print("  [3/6] Computing Audio Conformer intermediate activations & Audio retrieval reference...")
     with torch.no_grad():
         a_batch = processor(text=["<|audio|>"], audio=[audio_16k], return_tensors="pt")
-        a_feats = a_batch["input_features"].to(dev, dtype=torch.float32)
+        a_feats = a_batch["input_features"].to(dev, dtype=torch_dtype)
         a_mask = a_batch["input_features_mask"].to(dev)
         a_tower = hf_model.audio_tower
         cap = {}
@@ -507,13 +508,13 @@ def export_golden_reference(model_dir: str, data_dir: Path):
     aud_cand_vecs = st_model.encode(aud_cands, normalize_embeddings=True)
     aud_sims = [float(np.dot(aud_vec, c)) for c in aud_cand_vecs]
 
-    golden["audio"] = {
+    ref_data["audio"] = {
         "layer_activations": {
-            "subsample_proj": sub_out[0].detach().cpu().tolist(),
-            "layer0_out": l0_out[0].detach().cpu().tolist(),
-            "layer11_out": l11_out[0].detach().cpu().tolist(),
-            "audio_tower_out": tower_out[0].detach().cpu().tolist(),
-            "soft_tokens": aud_soft[0].detach().cpu().tolist(),
+            "subsample_proj": sub_out[0].float().detach().cpu().tolist(),
+            "layer0_out": l0_out[0].float().detach().cpu().tolist(),
+            "layer11_out": l11_out[0].float().detach().cpu().tolist(),
+            "audio_tower_out": tower_out[0].float().detach().cpu().tolist(),
+            "soft_tokens": aud_soft[0].float().detach().cpu().tolist(),
         },
         "roses_are": aud_mrl,
         "candidates": aud_cands,
@@ -545,7 +546,7 @@ def export_golden_reference(model_dir: str, data_dir: Path):
     )
     vid_sims_16f = [float(np.dot(vid16_vec, c)) for c in vid_cand_vecs]
 
-    golden["video"] = {
+    ref_data["video"] = {
         "cat_dozing_default": vid_mrl,
         "cat_dozing_16frames": vid16_mrl,
         "candidates": vid_cands,
@@ -584,7 +585,7 @@ def export_golden_reference(model_dir: str, data_dir: Path):
         np.matmul(np.stack([mm1_vec, mm2_vec, mm3_vec]), inter_cand_vecs.T).tolist()
     )
 
-    golden["interleaved"] = {
+    ref_data["interleaved"] = {
         "query_multimodal": mm1_mrl,
         "query_interleaved": mm2_mrl,
         "query_media_sequence": mm3_mrl,
@@ -592,11 +593,14 @@ def export_golden_reference(model_dir: str, data_dir: Path):
         "similarity_matrix": inter_sim_matrix,
     }
 
-    golden_path = data_dir / "golden_official.json"
+    ref_path = data_dir / "official_reference.json"
+    legacy_path = data_dir / "golden_official.json"
     print(f"  [6/6] Saving '{golden_path}'...")
-    with open(golden_path, "w", encoding="utf-8") as f:
-        json.dump(golden, f, indent=2)
-    print("[Golden Export] Complete!")
+    with open(ref_path, "w", encoding="utf-8") as f:
+        json.dump(ref_data, f, indent=2)
+    with open(legacy_path, "w", encoding="utf-8") as f:
+        json.dump(ref_data, f, indent=2)
+    print("[Reference Export] Complete!")
 
 
 def main():
@@ -625,7 +629,8 @@ def main():
     parser.add_argument("--max-frames", type=int, default=32, help="Video max frames budget")
     parser.add_argument("--overflow-strategy", type=str, default="truncate", choices=["truncate", "uniform"])
     parser.add_argument("--add-timestamps", action="store_true", help="Prepend mm:ss timestamps to video frames")
-    parser.add_argument("--export-golden", action="store_true", help="Also export golden_official.json from PyTorch")
+    parser.add_argument("--export-reference", action="store_true", help="Also export official reference baseline JSON from PyTorch")
+    parser.add_argument("--reference-dtype", type=str, default="bfloat16", choices=["bfloat16", "float32"], help="Data type for PyTorch reference baseline export")
     args = parser.parse_args()
 
     configure_video_backend()
@@ -720,8 +725,8 @@ def main():
         audios=[data_dir / "roses-are.wav"],
     )
 
-    if args.export_golden:
-        export_golden_reference(args.model_dir, data_dir)
+    if args.export_reference:
+        export_reference_baseline(args.model_dir, data_dir, dtype_str=args.reference_dtype)
 
     print("\nAll .mmfeat bundles generated successfully!")
 

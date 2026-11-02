@@ -39,13 +39,19 @@ struct MultimodalInputs {
     compute::BufferView<uint32_t> audio_token_indices{};// Sequence token indices for non-contiguous placement
 };
 
+enum class ExecutionBackend : uint32_t {
+    Simt = 0u,
+    Tile = 1u
+};
+
 class Executor {
 public:
     static luisa::unique_ptr<Executor> create(
         compute::Device &device,
         const Package &package,
         bool enable_vision = true,
-        bool enable_audio = true);
+        bool enable_audio = true,
+        ExecutionBackend backend = ExecutionBackend::Tile);
 
     virtual ~Executor() = default;
 

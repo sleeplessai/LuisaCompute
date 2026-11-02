@@ -28,6 +28,22 @@ void AudioTower::load_weights(const Package &package,
     const float *clip_src = nullptr;
     if (t_clips && t_clips->data) {
         clip_src = t_clips->data;
+    } else if (t_clips && t_clips->half_data) {
+        auto &unpacked = half_storage.emplace_back(t_clips->element_count());
+        for (size_t k = 0; k < unpacked.size(); ++k) {
+            uint16_t h = t_clips->half_data[k];
+            if (package.precision() == PackagePrecision::bf16) {
+                uint32_t w = static_cast<uint32_t>(h) << 16;
+                std::memcpy(&unpacked[k], &w, sizeof(float));
+            } else {
+                uint32_t sign = (h & 0x8000u) << 16;
+                uint32_t exp = (h & 0x7C00u) >> 10;
+                uint32_t mant = (h & 0x03FFu) << 13;
+                uint32_t f_val = (exp == 0x1Fu) ? (sign | 0x7F800000u | mant) : (exp == 0 ? sign : (sign | ((exp + 112) << 23) | mant));
+                std::memcpy(&unpacked[k], &f_val, sizeof(float));
+            }
+        }
+        clip_src = unpacked.data();
     }
 
     _layers.resize(12);

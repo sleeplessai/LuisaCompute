@@ -1,3 +1,4 @@
+#include "embedding_mm/embed/models_tile/embedding_gemma2_tile.h"
 // embedding_mm engine -- Top-level EmbeddingGemma-2 multimodal model implementation.
 #include "embedding_mm/embed/models/embedding_gemma2.h"
 
@@ -154,7 +155,15 @@ luisa::unique_ptr<Executor> Executor::create(
     compute::Device &device,
     const Package &package,
     bool enable_vision,
-    bool enable_audio) {
+    bool enable_audio,
+    ExecutionBackend backend) {
+    if (backend == ExecutionBackend::Tile) {
+        LUISA_INFO("Executor: creating EmbeddingGemma2Tile (Tile backend, BF16 Tensor Core MMA)...");
+        auto model = luisa::make_unique<EmbeddingGemma2Tile>(device);
+        model->initialize(package, enable_vision, enable_audio);
+        return model;
+    }
+    LUISA_INFO("Executor: creating EmbeddingGemma2 (SIMT backend)...");
     auto model = luisa::make_unique<EmbeddingGemma2>(device);
     model->initialize(package, enable_vision, enable_audio);
     return model;

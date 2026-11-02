@@ -17,8 +17,23 @@ add_library(lc-example-embedding-mm STATIC
     embed/models/audio_tower.cpp
     embed/models/language_model.cpp
     embed/models/embedding_gemma2.cpp
+    embed/ops_tile/ops_tile_common.cpp
+    embed/ops_tile/ops_gemm.cpp
+    embed/ops_tile/ops_norm.cpp
+    embed/ops_tile/ops_rope.cpp
+    embed/ops_tile/ops_attention.cpp
+    embed/ops_tile/ops_mlp.cpp
+    embed/ops_tile/ops_conv.cpp
+    embed/ops_tile/ops_pool.cpp
+    embed/ops_tile/ops_embed.cpp
+    embed/models_tile/model_tile_common.cpp
+    embed/models_tile/language_model_tile.cpp
+    embed/models_tile/vision_tower_tile.cpp
+    embed/models_tile/audio_tower_tile.cpp
+    embed/models_tile/embedding_gemma2_tile.cpp
 )
 target_link_libraries(lc-example-embedding-mm PUBLIC luisa::compute)
+target_link_libraries(lc-example-embedding-mm PUBLIC luisa-compute-tile)
 target_link_libraries(lc-example-embedding-mm PUBLIC luisa-compute-ext-yyjson-interface)
 target_include_directories(lc-example-embedding-mm PUBLIC
     ${CMAKE_CURRENT_SOURCE_DIR}

@@ -26,6 +26,7 @@
 #include <luisa/runtime/stream.h>
 
 #include "embedding_mm/embed/feature_loader.h"
+#include "embedding_mm/embed/executor.h"
 
 namespace luisa::embed_mm {
 
@@ -36,6 +37,7 @@ class Executor;
 struct SessionConfig {
     bool enable_vision{true};// Selective Encoder Loading (toggle vision ~170M params)
     bool enable_audio{true}; // Selective Encoder Loading (toggle audio ~300M params)
+    ExecutionBackend backend{ExecutionBackend::Tile};
 };
 
 struct EncodeOptions {

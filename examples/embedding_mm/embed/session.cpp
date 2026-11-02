@@ -63,9 +63,19 @@ luisa::unique_ptr<Session> Session::create(
     LUISA_INFO("Session: loading tokenizer from '{}'...", tokenizer_json.string());
     sess->_tokenizer = Tokenizer::load(tokenizer_json);
 
-    LUISA_INFO("Session: initializing executor (enable_vision={}, enable_audio={})...",
+    auto backend = config.backend;
+    if (auto env_backend = luisa::get_environment_variable("LUISA_EMBED_MM_EXEC")) {
+        if (luisa::string_view{*env_backend} == "simt") {
+            backend = ExecutionBackend::Simt;
+        } else if (luisa::string_view{*env_backend} == "tile") {
+            backend = ExecutionBackend::Tile;
+        }
+    }
+
+    LUISA_INFO("Session: initializing executor (backend={}, enable_vision={}, enable_audio={})...",
+               backend == ExecutionBackend::Tile ? "Tile" : "Simt",
                config.enable_vision, config.enable_audio);
-    sess->_executor = Executor::create(device, *sess->_package, config.enable_vision, config.enable_audio);
+    sess->_executor = Executor::create(device, *sess->_package, config.enable_vision, config.enable_audio, backend);
     sess->_has_vision = sess->_executor->has_vision();
     sess->_has_audio = sess->_executor->has_audio();
 
