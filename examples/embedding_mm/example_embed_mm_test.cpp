@@ -525,7 +525,46 @@ void test_tile_kernels(Device &device) {
         for (uint32_t i = 0; i < M * N; i++) {
             TEST_ASSERT(std::abs(host_c[i] - expected_c[i]) < 0.05f, "Tile GEMM calculation mismatch");
         }
-        std::cout << "  [PASS] Tile GEMM (BF16 Tensor Core) operator verified." << std::endl;
+        std::cout << "  [PASS] Tile GEMM (BF16 Tensor Core, 2D Spatial) operator verified." << std::endl;
+
+        // Test Split-K GEMM with workspace
+        {
+            constexpr uint32_t sM = 8u;
+            constexpr uint32_t sN = 128u;
+            constexpr uint32_t sK = 256u;
+            luisa::vector<float> splitk_a(sM * sK);
+            luisa::vector<luisa::bfloat16> splitk_b(sK * sN);
+            luisa::vector<float> splitk_c(sM * sN);
+            luisa::vector<float> splitk_exp(sM * sN, 0.0f);
+
+            for (uint32_t i = 0; i < sM * sK; i++) splitk_a[i] = static_cast<float>(i % 11) * 0.05f;
+            for (uint32_t i = 0; i < sK * sN; i++) splitk_b[i] = luisa::bfloat16{static_cast<float>(i % 7) * 0.05f};
+            for (uint32_t m = 0; m < sM; m++) {
+                for (uint32_t n = 0; n < sN; n++) {
+                    float acc = 0.0f;
+                    for (uint32_t k = 0; k < sK; k++) {
+                        acc += splitk_a[m * sK + k] * static_cast<float>(splitk_b[k * sN + n]);
+                    }
+                    splitk_exp[m * sN + n] = acc;
+                }
+            }
+            auto buf_sa = device.create_buffer<float>(sM * sK);
+            auto buf_sb = device.create_buffer<luisa::bfloat16>(sK * sN);
+            auto buf_sc = device.create_buffer<float>(sM * sN);
+            auto buf_ws = device.create_buffer<float>(8u * 64u * sN);
+
+            CommandList splitk_cmd;
+            splitk_cmd << buf_sa.copy_from(splitk_a.data())
+                       << buf_sb.copy_from(splitk_b.data())
+                       << ops_tile::dispatch_tile_gemm(device, cache, buf_sa.view(), buf_sb.view(), buf_sc.view(), sM, sN, sK, buf_ws.view())
+                       << buf_sc.copy_to(splitk_c.data());
+            stream << splitk_cmd.commit() << synchronize();
+
+            for (uint32_t i = 0; i < sM * sN; i++) {
+                TEST_ASSERT(std::abs(splitk_c[i] - splitk_exp[i]) < 0.05f, "Split-K Tile GEMM calculation mismatch");
+            }
+            std::cout << "  [PASS] Tile GEMM (BF16 Tensor Core, Adaptive Split-K) operator verified." << std::endl;
+        }
     }
 
     // (d) Test Tile GeGLU

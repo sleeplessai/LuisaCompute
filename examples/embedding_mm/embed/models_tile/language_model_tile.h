@@ -106,6 +106,7 @@ private:
     compute::Buffer<float> _ple_norm_buf;
     compute::Buffer<float> _pooled;
     compute::Buffer<float> _proj_out;
+    compute::Buffer<float> _splitk_workspace;
 
     size_t _max_tokens{0};
     size_t _max_batch{0};

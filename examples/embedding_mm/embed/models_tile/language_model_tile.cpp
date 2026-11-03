@@ -116,6 +116,11 @@ void LanguageModelTile::ensure_workspace(uint32_t B, uint32_t S) {
     _ple_norm_buf = _device.create_buffer<float>(_max_tokens * H);
     _pooled = _device.create_buffer<float>(_max_batch * H);
     _proj_out = _device.create_buffer<float>(_max_batch * 768);
+
+    constexpr size_t max_splitk_workspace = 8ull * 64ull * 2048ull;// 4 MB, strictly resident in 6 MB L2
+    if (_splitk_workspace.size() < max_splitk_workspace) {
+        _splitk_workspace = _device.create_buffer<float>(max_splitk_workspace);
+    }
 }
 
 void LanguageModelTile::record_encode(
@@ -166,7 +171,7 @@ void LanguageModelTile::record_encode(
 
     // 3. Global PLE Projection + RMSNorm
     cmd_list << ops_tile::dispatch_tile_gemm(
-        _device, _cache, _h0, _ple_proj, _ple_all, total_tokens, num_layers * H, H);
+        _device, _cache, _h0, _ple_proj, _ple_all, total_tokens, num_layers * H, H, _splitk_workspace.view());
     cmd_list << ops_tile::dispatch_tile_rmsnorm(
         _device, _cache, _ple_all, _ple_all, _ple_norm, total_tokens * num_layers, H, 1e-6f);
 
@@ -188,9 +193,9 @@ void LanguageModelTile::record_encode(
             _device, _cache, _h0, _h_norm, layer.input_norm, total_tokens, H, 1e-6f);
 
         // (b) Q, K, V projections
-        cmd_list << ops_tile::dispatch_tile_gemm(_device, _cache, _h_norm, layer.q_proj, _q_buf, total_tokens, q_dim, H);
-        cmd_list << ops_tile::dispatch_tile_gemm(_device, _cache, _h_norm, layer.k_proj, _k_buf, total_tokens, kv_dim, H);
-        cmd_list << ops_tile::dispatch_tile_gemm(_device, _cache, _h_norm, layer.v_proj, _v_buf, total_tokens, kv_dim, H);
+        cmd_list << ops_tile::dispatch_tile_gemm(_device, _cache, _h_norm, layer.q_proj, _q_buf, total_tokens, q_dim, H, _splitk_workspace.view());
+        cmd_list << ops_tile::dispatch_tile_gemm(_device, _cache, _h_norm, layer.k_proj, _k_buf, total_tokens, kv_dim, H, _splitk_workspace.view());
+        cmd_list << ops_tile::dispatch_tile_gemm(_device, _cache, _h_norm, layer.v_proj, _v_buf, total_tokens, kv_dim, H, _splitk_workspace.view());
 
         // (c) Q, K, V RMSNorm
         cmd_list << ops_tile::dispatch_tile_rmsnorm(_device, _cache, _q_buf, _q_buf, layer.q_norm, total_tokens * num_q_heads, head_dim, 1e-6f);
@@ -210,7 +215,7 @@ void LanguageModelTile::record_encode(
             B, S, num_q_heads, num_kv_heads, head_dim, 1.0f, is_sliding ? 1u : 0u, sliding_window);
 
         // (f) Out GEMM
-        cmd_list << ops_tile::dispatch_tile_gemm(_device, _cache, _attn_ctx, layer.out_proj, _attn_out, total_tokens, H, q_dim);
+        cmd_list << ops_tile::dispatch_tile_gemm(_device, _cache, _attn_ctx, layer.out_proj, _attn_out, total_tokens, H, q_dim, _splitk_workspace.view());
 
         // (g) Post-attention RMSNorm + Residual Add
         cmd_list << ops_tile::dispatch_tile_rmsnorm(_device, _cache, _attn_out, _attn_norm, layer.post_attn_norm, total_tokens, H, 1e-6f);
@@ -220,23 +225,23 @@ void LanguageModelTile::record_encode(
         cmd_list << ops_tile::dispatch_tile_rmsnorm(_device, _cache, _h0, _ffn_norm, layer.pre_ffn_norm, total_tokens, H, 1e-6f);
 
         // (i) MLP Gate & Up projections
-        cmd_list << ops_tile::dispatch_tile_gemm(_device, _cache, _ffn_norm, layer.gate_proj, _gate_buf, total_tokens, I, H);
-        cmd_list << ops_tile::dispatch_tile_gemm(_device, _cache, _ffn_norm, layer.up_proj, _up_buf, total_tokens, I, H);
+        cmd_list << ops_tile::dispatch_tile_gemm(_device, _cache, _ffn_norm, layer.gate_proj, _gate_buf, total_tokens, I, H, _splitk_workspace.view());
+        cmd_list << ops_tile::dispatch_tile_gemm(_device, _cache, _ffn_norm, layer.up_proj, _up_buf, total_tokens, I, H, _splitk_workspace.view());
 
         // (j) GeGLU activation
         cmd_list << ops_tile::dispatch_tile_geglu(_device, _cache, _gate_buf, _up_buf, _mlp_act, total_tokens * I);
 
         // (k) MLP Down projection
-        cmd_list << ops_tile::dispatch_tile_gemm(_device, _cache, _mlp_act, layer.down_proj, _mlp_out, total_tokens, H, I);
+        cmd_list << ops_tile::dispatch_tile_gemm(_device, _cache, _mlp_act, layer.down_proj, _mlp_out, total_tokens, H, I, _splitk_workspace.view());
 
         // (l) Post-FFN RMSNorm + Residual Add
         cmd_list << ops_tile::dispatch_tile_rmsnorm(_device, _cache, _mlp_out, _mlp_norm, layer.post_ffn_norm, total_tokens, H, 1e-6f);
         cmd_list << ops_tile::dispatch_tile_residual_add(_device, _cache, _h0, _mlp_norm, _h0, total_tokens * H);
 
         // (m) PLE Block
-        cmd_list << ops_tile::dispatch_tile_gemm(_device, _cache, _h0, layer.ple_gate, _ple_gate_buf, total_tokens, H, H);
+        cmd_list << ops_tile::dispatch_tile_gemm(_device, _cache, _h0, layer.ple_gate, _ple_gate_buf, total_tokens, H, H, _splitk_workspace.view());
         cmd_list << ops_tile::dispatch_tile_ple_gate(_device, _cache, _ple_gate_buf, _ple_all, _ple_gated, i, total_tokens, num_layers, H);
-        cmd_list << ops_tile::dispatch_tile_gemm(_device, _cache, _ple_gated, layer.ple_proj, _ple_out, total_tokens, H, H);
+        cmd_list << ops_tile::dispatch_tile_gemm(_device, _cache, _ple_gated, layer.ple_proj, _ple_out, total_tokens, H, H, _splitk_workspace.view());
         cmd_list << ops_tile::dispatch_tile_rmsnorm(_device, _cache, _ple_out, _ple_norm_buf, layer.ple_norm, total_tokens, H, 1e-6f);
 
         // (n) Residual Add + Layer Scalar
@@ -250,7 +255,7 @@ void LanguageModelTile::record_encode(
     cmd_list << ops_tile::dispatch_tile_mean_pool(_device, _cache, _h_norm, attention_mask, _pooled, B, S, H);
 
     // 7. Dense Projection (512 -> 768)
-    cmd_list << ops_tile::dispatch_tile_gemm(_device, _cache, _pooled, _embedding_proj, _proj_out, B, 768u, H);
+    cmd_list << ops_tile::dispatch_tile_gemm(_device, _cache, _pooled, _embedding_proj, _proj_out, B, 768u, H, _splitk_workspace.view());
 
     // 8. MRL Truncation + L2 Normalization
     cmd_list << ops_tile::dispatch_tile_mrl_normalize(_device, _cache, _proj_out, out_embeddings, B, 768u, target_dim);
